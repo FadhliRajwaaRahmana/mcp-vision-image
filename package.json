@@ -1,0 +1,33 @@
+{
+  "name": "mcp-vision-image-fadhli",
+  "version": "1.0.0",
+  "description": "MCP server untuk analisis gambar (vision) via Gemini API — stdio, bisa dipakai langsung dengan `npx -y mcp-vision-image-fadhli`",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "mcp-vision-image-fadhli": "./src/server.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/test-server.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "vision",
+    "gemini",
+    "image",
+    "claude"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "zod": "^3.24.2"
+  }
+}
