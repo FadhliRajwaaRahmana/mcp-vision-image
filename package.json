@@ -1,6 +1,6 @@
 {
   "name": "mcp-vision-image-fadhli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server untuk analisis gambar (vision) via Gemini API — stdio, bisa dipakai langsung dengan `npx -y mcp-vision-image-fadhli`",
   "type": "module",
   "main": "src/server.js",

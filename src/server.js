@@ -34,7 +34,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe('Model Gemini yang digunakan. Default: "gemini-3.6-flash"'),
+      .describe('Model Gemini yang digunakan. Default: "gemini-3.7-flash"'),
   },
   async ({ image_path, image_url, prompt, model }) => {
     try {
@@ -57,7 +57,7 @@ server.tool(
         base64Data,
         mimeType,
         prompt: prompt || 'Deskripsikan gambar ini secara detail dalam Bahasa Indonesia.',
-        model: model || 'gemini-3.6-flash',
+        model: model || 'gemini-3.7-flash',
       });
 
       return {

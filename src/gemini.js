@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const DEFAULT_MODEL = 'gemini-3.6-flash';
+const DEFAULT_MODEL = 'gemini-3.7-flash';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, '..', 'stats', 'usage.json');
