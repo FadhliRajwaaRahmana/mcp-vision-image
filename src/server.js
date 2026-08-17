@@ -35,7 +35,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe('Model Gemini yang digunakan. Default: otomatis model Flash terbaru (gemini-flash-latest). Bisa di-override via env GEMINI_MODEL.'),
+      .describe('Model Gemini yang digunakan. Default: "gemini-3.7-flash". Bisa di-override via env GEMINI_MODEL.'),
   },
   async ({ image_path, image_url, prompt, model }) => {
     try {

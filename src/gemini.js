@@ -6,9 +6,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Uses Google's auto-updating alias so we always get the latest GA Flash model.
-// Override via env GEMINI_MODEL (e.g. "gemini-3.7-flash") to pin a specific version.
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+// Default: gemini-3.7-flash (GA August 13, 2026) — best Flash model for vision/coding/agents.
+// Override via env GEMINI_MODEL to use a different model without changing code.
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, '..', 'stats', 'usage.json');
