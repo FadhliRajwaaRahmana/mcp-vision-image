@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { processImageSource } from './image.js';
-import { analyzeImageWithGemini, getUsageStats } from './gemini.js';
+import { analyzeImageWithGemini, getUsageStats, getDefaultModel } from './gemini.js';
 
 const server = new McpServer({
   name: 'mcp-vision-image',
@@ -34,7 +34,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe('Model Gemini yang digunakan. Default: "gemini-3.7-flash"'),
+      .describe('Model Gemini yang digunakan. Default: otomatis model Flash terbaru (gemini-flash-latest). Bisa di-override via env GEMINI_MODEL.'),
   },
   async ({ image_path, image_url, prompt, model }) => {
     try {
@@ -57,7 +57,7 @@ server.tool(
         base64Data,
         mimeType,
         prompt: prompt || 'Deskripsikan gambar ini secara detail dalam Bahasa Indonesia.',
-        model: model || 'gemini-3.7-flash',
+        model: model || getDefaultModel(),
       });
 
       return {

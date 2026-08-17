@@ -6,7 +6,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const DEFAULT_MODEL = 'gemini-3.7-flash';
+// Uses Google's auto-updating alias so we always get the latest GA Flash model.
+// Override via env GEMINI_MODEL (e.g. "gemini-3.7-flash") to pin a specific version.
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, '..', 'stats', 'usage.json');
@@ -45,6 +47,10 @@ function recordUsage(model, { success = true, errorMsg = null } = {}) {
     // Jangan pernah crash request utama hanya karena gagal menyimpan statistik
     console.error('[MCP Vision Stats] Gagal menulis statistik:', err.message);
   }
+}
+
+export function getDefaultModel() {
+  return DEFAULT_MODEL;
 }
 
 export function getUsageStats() {
