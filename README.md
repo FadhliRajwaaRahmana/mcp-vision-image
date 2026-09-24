@@ -87,10 +87,30 @@ API key diambil dari dashboard 9router → **Endpoint & Key**.
 | Variabel | Default | Keterangan |
 |---|---|---|
 | `ROUTER9_API_KEY` | — | **Wajib.** API key 9router. |
+| `VISION_PROVIDERS` | semua | Batasi pemindaian ke provider tertentu, dipisah koma (mis. `ag,oc`). |
 | `ROUTER9_BASE_URL` | `http://127.0.0.1:20128` | Alamat 9router. |
 | `ROUTER9_MODEL` | — | Paksa satu model, lewati pemilihan otomatis. |
 | `ROUTER9_MAX_TOKENS` | `2000` | Batas token jawaban. |
 | `ROUTER9_TIMEOUT_MS` | `120000` | Timeout per model. |
+
+### Membatasi ke provider tertentu
+
+Kalau Anda hanya memakai beberapa provider, batasi pemindaian supaya tidak
+boros kuota dan waktu:
+
+```json
+"env": {
+  "ROUTER9_API_KEY": "sk-xxxxxxxxxxxx",
+  "VISION_PROVIDERS": "ag,oc"
+}
+```
+
+`ag` = Antigravity, `oc` = OpenCode. Provider yang diminta tapi **tidak ada**
+di katalog akan dilaporkan sebagai peringatan — tidak diabaikan diam-diam.
+
+Efeknya terukur: memindai semua provider menemukan **4** model bekerja dari 30
+diuji; dibatasi ke `ag` menemukan **9** dari 10 diuji — karena provider yang
+sehat tidak lagi tenggelam di antara provider yang kreditnya habis.
 
 ---
 

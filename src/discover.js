@@ -185,6 +185,7 @@ async function pool(items, worker, n) {
  * @param {number} [o.waveSize=8]    model per gelombang
  * @param {number} [o.maxProbe=48]   batas atas model yang dipindai (anti-boros)
  * @param {boolean} [o.includeNonVision=false] ikut uji yang tidak mengklaim vision
+ * @param {string[]} [o.providers]   batasi ke provider ini saja (mis. ['ag','oc'])
  * @param {function} [o.onProgress]  dipanggil tiap gelombang selesai
  * @returns {Promise<object>} hasil + ringkasan
  */
@@ -197,17 +198,30 @@ export async function discoverVisionModels({
   timeoutMs = 45000,
   concurrency = 6,
   includeNonVision = false,
+  providers = null,
   onProgress = null,
 } = {}) {
   const cache = readCache(baseUrl);
   const providerScore = cache?.providerScore || {};
 
   const catalog = await listModels({ baseUrl, apiKey });
+
+  // Batasi ke provider tertentu kalau diminta. Ini berguna karena sebagian
+  // instalasi hanya memakai beberapa provider saja — memindai 27 provider
+  // padahal cuma 2 yang dipakai itu boros kuota dan waktu.
+  const hanya = providers && providers.length ? new Set(providers) : null;
+  const dalamCakupan = (m) => !hanya || hanya.has(m.owned_by);
+
+  // Provider yang diminta tapi tidak ada di katalog — dilaporkan supaya tidak
+  // diam-diam diabaikan (mis. typo nama provider, atau provider sudah dihapus).
+  const providerHilang = hanya
+    ? [...hanya].filter((p) => !catalog.some((m) => m.owned_by === p))
+    : [];
   const visionClaiming = catalog.filter(
-    (m) => m.capabilities?.vision === true && m.owned_by !== 'combo'
+    (m) => m.capabilities?.vision === true && m.owned_by !== 'combo' && dalamCakupan(m)
   );
   const others = catalog.filter(
-    (m) => m.capabilities?.vision !== true && m.owned_by !== 'combo'
+    (m) => m.capabilities?.vision !== true && m.owned_by !== 'combo' && dalamCakupan(m)
   );
 
   const candidates = includeNonVision ? [...visionClaiming, ...others] : visionClaiming;
@@ -305,6 +319,8 @@ export async function discoverVisionModels({
     catalogTotal: catalog.length,
     visionClaiming: visionClaiming.length,
     providers: jumlahProvider,
+    providerFilter: hanya ? [...hanya] : null,
+    providerHilang,
     probed: probedModels.size,
     // Dilaporkan terbuka — batas yang tidak dilaporkan membuat hasil
     // terlihat "menyeluruh" padahal tidak.

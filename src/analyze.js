@@ -41,6 +41,24 @@ function baseUrl() {
 }
 
 /**
+ * Provider yang boleh dipindai, dari env `VISION_PROVIDERS` (mis. "ag,oc").
+ *
+ * Berguna karena sebagian instalasi hanya memakai beberapa provider —
+ * memindai 27 provider padahal cuma 2 yang dipakai itu boros kuota & waktu.
+ * Kosong/null = semua provider dipindai.
+ *
+ * @returns {string[]|null}
+ */
+export function getProviderFilter() {
+  const raw = process.env.VISION_PROVIDERS;
+  if (!raw || !raw.trim()) return null;
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
  * Daftar model yang boleh dicoba, berurutan dari yang paling diinginkan.
  * @returns {string[]}
  */
@@ -80,6 +98,9 @@ export function getBackendInfo() {
           working: (cache.working || []).length,
           catalogTotal: cache.catalogTotal,
           visionClaiming: cache.visionClaiming,
+          providers: cache.providers,
+          providerFilter: cache.providerFilter,
+          providerHilang: cache.providerHilang,
           probed: cache.probed,
           notProbed: cache.notProbed,
           reachedTarget: cache.reachedTarget,
@@ -165,6 +186,7 @@ export async function analyzeImage({
       discovery = await discoverVisionModels({
         baseUrl: baseUrl(),
         apiKey,
+        providers: getProviderFilter(),
         onProgress,
       });
       const teks2 = await coba(discovery.working.map((w) => w.model));

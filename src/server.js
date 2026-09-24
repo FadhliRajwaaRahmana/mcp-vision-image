@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { processImageSource } from './image.js';
-import { analyzeImage, getBackendInfo } from './analyze.js';
+import { analyzeImage, getBackendInfo, getProviderFilter } from './analyze.js';
 import { discoverVisionModels, readCache } from './discover.js';
 import { getUsageStats, recordUsage } from './usage.js';
 
@@ -98,13 +98,23 @@ server.tool(
       .boolean()
       .optional()
       .describe('Ikut uji model yang TIDAK mengklaim vision — untuk memeriksa akurasi metadata katalog. Default false.'),
+    providers: z
+      .string()
+      .optional()
+      .describe(
+        'Batasi ke provider tertentu, dipisah koma (mis. "ag,oc"). Kosongkan untuk memakai VISION_PROVIDERS, atau semua provider kalau env itu juga kosong.'
+      ),
     timeout_ms: z.number().int().min(5000).max(300000).optional().describe('Timeout per model. Default 45000.'),
   },
-  async ({ target, max_probe, wave_size, include_non_vision, timeout_ms }) => {
+  async ({ target, max_probe, wave_size, include_non_vision, providers, timeout_ms }) => {
     const apiKey = process.env.ROUTER9_API_KEY;
     if (!apiKey) return galat('ROUTER9_API_KEY belum diset.');
 
     const bu = process.env.ROUTER9_BASE_URL || 'http://127.0.0.1:20128';
+    const filter =
+      providers && providers.trim()
+        ? providers.split(',').map((s) => s.trim()).filter(Boolean)
+        : getProviderFilter();
     try {
       const r = await discoverVisionModels({
         baseUrl: bu,
@@ -113,6 +123,7 @@ server.tool(
         maxProbe: max_probe ?? 48,
         waveSize: wave_size ?? 8,
         includeNonVision: include_non_vision ?? false,
+        providers: filter,
         timeoutMs: timeout_ms ?? 45000,
       });
 
@@ -121,9 +132,15 @@ server.tool(
         ``,
         `- Katalog 9router: **${r.catalogTotal}** model`,
         `- Mengklaim vision: **${r.visionClaiming}**`,
+        r.providerFilter ? `- Dibatasi ke provider: **${r.providerFilter.join(', ')}**` : `- Cakupan: semua provider (${r.providers})`,
         `- Benar-benar diuji: **${r.probed}**`,
         `- **Bekerja: ${r.working.length}**${r.reachedTarget ? ` (target ${r.target} tercapai)` : ` — target ${r.target} TIDAK tercapai`}`,
       ];
+      if (r.providerHilang?.length) {
+        baris.push(
+          `- ⚠️ Provider yang diminta TIDAK ADA di katalog: **${r.providerHilang.join(', ')}**`
+        );
+      }
       if (r.notProbed) {
         baris.push(`- ⚠️ **${r.notProbed} model tidak diuji** (kena batas \`max_probe\`)`);
       }
@@ -167,6 +184,11 @@ server.tool(
     );
     baris.push(`- Model default: \`${b.defaultModel}\``);
 
+    const filterAktif = getProviderFilter();
+    if (filterAktif) {
+      baris.push(`- Filter provider: \`${filterAktif.join(', ')}\` (dari VISION_PROVIDERS)`);
+    }
+
     if (b.discovery) {
       const d = b.discovery;
       baris.push(
@@ -174,9 +196,13 @@ server.tool(
         `**Pemindaian model vision terakhir:**`,
         `- Waktu: ${new Date(d.scannedAt).toLocaleString('id-ID')}`,
         `- Bekerja: **${d.working}** dari ${d.probed} diuji (katalog ${d.catalogTotal}, klaim vision ${d.visionClaiming})`,
+        `- Cakupan: ${d.providerFilter ? `provider ${d.providerFilter.join(', ')}` : `semua provider (${d.providers})`}`,
         `- Target tercapai: ${d.reachedTarget ? 'ya' : 'TIDAK'}` +
           (d.notProbed ? ` | ${d.notProbed} tidak diuji` : '')
       );
+      if (d.providerHilang?.length) {
+        baris.push(`- ⚠️ Provider tidak ada di katalog: **${d.providerHilang.join(', ')}**`);
+      }
       if (d.top?.length) {
         baris.push(`- Teratas: ${d.top.map((t) => `\`${t.model}\` (${t.ms}ms)`).join(', ')}`);
       }
