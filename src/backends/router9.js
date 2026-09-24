@@ -8,6 +8,10 @@
  * pada model yang sama menjawab dengan benar. Jadi ini bukan soal model,
  * tapi soal jalur translasi gambar di 9router.
  *
+ * Catatan: `DEFAULT_MODEL` di bawah hanyalah TEBAKAN TERAKHIR. Model yang
+ * benar-benar dipakai dipilih oleh analyze.js dari hasil pemindaian nyata
+ * (discover.js) — karena model yang bekerja berbeda-beda di tiap instalasi.
+ *
  * Terukur (gambar 3 kotak merah/hijau/biru, jawaban harus menyebut ketiganya):
  *   ag/gemini-3.8-flash-high     OpenAI: kosong | Anthropic: "Ada 3 kotak, ..." OK
  *   ag/gemini-3.8-flash-medium   OpenAI: kosong | Anthropic: "Ada 3 kotak: ..." OK

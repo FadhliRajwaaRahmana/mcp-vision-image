@@ -4,58 +4,42 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { processImageSource } from './image.js';
 import { analyzeImage, getBackendInfo } from './analyze.js';
+import { discoverVisionModels, readCache } from './discover.js';
 import { getUsageStats, recordUsage } from './usage.js';
 
 const server = new McpServer({
   name: 'mcp-vision-image',
-  version: '2.0.0',
+  version: '3.0.0',
 });
 
-// Pendaftaran Tool: analyze_image
+function teks(s) {
+  return { content: [{ type: 'text', text: s }] };
+}
+function galat(s) {
+  return { content: [{ type: 'text', text: s }], isError: true };
+}
+
+// ---------- analyze_image ----------
 server.tool(
   'analyze_image',
-  'Menganalisis dan mendeskripsikan gambar (file path lokal atau URL) memakai rantai backend vision (9router → Gemini).',
+  'Menganalisis gambar (file lokal atau URL) lewat 9router. Model vision yang dipakai dipilih otomatis dari hasil pemindaian nyata di mesin ini — kalau belum pernah dipindai, pemindaian dijalankan lebih dulu.',
   {
-    image_path: z
-      .string()
-      .optional()
-      .describe(
-        'Path file gambar lokal di sistem (misal: "C:\\path\\to\\image.png" atau "./foto.jpg")'
-      ),
-    image_url: z
-      .string()
-      .optional()
-      .describe(
-        'URL gambar online yang di-copy dari browser atau clipboard (misal: "https://example.com/foto.jpg" atau URL berakhiran .png/.jpg/.webp/.gif). Server akan mengunduh gambar dari URL tersebut.'
-      ),
+    image_path: z.string().optional().describe('Path file gambar lokal (mis. "C:\\\\foto.png" atau "./foto.jpg")'),
+    image_url: z.string().optional().describe('URL gambar online; server akan mengunduhnya.'),
     prompt: z
       .string()
       .optional()
-      .describe(
-        'Pertanyaan atau instruksi spesifik seputar gambar (misal: "Bacakan teks di gambar ini", "Apakah ada kucing?"). Default: deskripsi lengkap.'
-      ),
+      .describe('Instruksi spesifik seputar gambar. Default: deskripsi detail dalam Bahasa Indonesia.'),
     model: z
       .string()
       .optional()
-      .describe(
-        'Paksa model tertentu (mis. "ag/gemini-3.8-flash-medium" untuk 9router, atau "gemini-3.6-flash" untuk Gemini langsung). Kosongkan agar tiap backend memakai default-nya.'
-      ),
+      .describe('Paksa model tertentu (mis. "ag/gemini-3.8-flash-high"). Kosongkan agar dipilih otomatis.'),
   },
   async ({ image_path, image_url, prompt, model }) => {
-    try {
-      const source = image_path || image_url;
-      if (!source) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'Error: Anda harus memberikan parameter `image_path` (file lokal) atau `image_url` (URL online).',
-            },
-          ],
-          isError: true,
-        };
-      }
+    const source = image_path || image_url;
+    if (!source) return galat('Error: berikan `image_path` (file lokal) atau `image_url` (URL online).');
 
+    try {
       const { mimeType, base64Data } = await processImageSource(source);
 
       const hasil = await analyzeImage({
@@ -65,97 +49,176 @@ server.tool(
         model,
       });
 
-      // Catat pemakaian per backend — berguna untuk melihat mana yang kepakai.
-      recordUsage(hasil.backend, model || 'default', { success: true });
+      recordUsage(hasil.model, { success: true });
 
-      const catatan = hasil.attempts
-        .filter((a) => !a.ok)
-        .map((a) => `${a.backend}: ${a.error}`)
-        .join(' | ');
+      const gagal = hasil.attempts.filter((a) => !a.ok);
+      const catatan = gagal.length
+        ? `\n\n_(model: ${hasil.model}; dilewati → ${gagal.map((a) => `${a.model}: ${a.kind || a.error}`).join(' | ')})_`
+        : `\n\n_(model: ${hasil.model}, ${hasil.totalMs}ms)_`;
 
-      return {
-        content: [
-          {
-            type: 'text',
-            text: catatan ? `${hasil.text}\n\n_(backend: ${hasil.backend}; dilewati → ${catatan})_` : hasil.text,
-          },
-        ],
-      };
+      // Kalau pemindaian baru saja dijalankan, laporkan apa yang ditemukan.
+      let infoPindai = '';
+      if (hasil.discovery) {
+        const d = hasil.discovery;
+        infoPindai =
+          `\n\n_(pemindaian otomatis: ${d.probed} model diuji, ${d.working.length} bekerja` +
+          `${d.reachedTarget ? '' : `; target ${d.target} tidak tercapai`}` +
+          `${d.notProbed ? `; ${d.notProbed} model tidak diuji (batas)` : ''})_`;
+      }
+
+      return teks(hasil.text + catatan + infoPindai);
     } catch (err) {
-      recordUsage('semua', model || 'default', { success: false, errorMsg: String(err.message).slice(0, 300) });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Gagal menganalisis gambar: ${err.message}`,
-          },
-        ],
-        isError: true,
-      };
+      recordUsage('semua', { success: false, errorMsg: String(err.message).slice(0, 300) });
+      return galat(`Gagal menganalisis gambar: ${err.message}`);
     }
   }
 );
 
-// Pendaftaran Tool: get_usage_stats (monitoring pemakaian)
+// ---------- discover_vision_models ----------
+server.tool(
+  'discover_vision_models',
+  'Memindai 9router untuk menemukan model yang BENAR-BENAR bisa memproses gambar di mesin ini, dengan menguji tiap model memakai gambar uji berisi 3 kotak berwarna. Hasilnya di-cache dan dipakai otomatis oleh analyze_image. Jalankan ulang kalau daftar model terasa basi (provider berganti, kredit berubah).',
+  {
+    target: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe('Berapa model yang bekerja ingin ditemukan sebelum berhenti. Default 5.'),
+    max_probe: z
+      .number()
+      .int()
+      .min(1)
+      .max(400)
+      .optional()
+      .describe('Batas atas jumlah model yang diuji — pengaman kuota. Default 48.'),
+    wave_size: z.number().int().min(1).max(50).optional().describe('Model per gelombang. Default 8.'),
+    include_non_vision: z
+      .boolean()
+      .optional()
+      .describe('Ikut uji model yang TIDAK mengklaim vision — untuk memeriksa akurasi metadata katalog. Default false.'),
+    timeout_ms: z.number().int().min(5000).max(300000).optional().describe('Timeout per model. Default 45000.'),
+  },
+  async ({ target, max_probe, wave_size, include_non_vision, timeout_ms }) => {
+    const apiKey = process.env.ROUTER9_API_KEY;
+    if (!apiKey) return galat('ROUTER9_API_KEY belum diset.');
+
+    const bu = process.env.ROUTER9_BASE_URL || 'http://127.0.0.1:20128';
+    try {
+      const r = await discoverVisionModels({
+        baseUrl: bu,
+        apiKey,
+        target: target ?? 5,
+        maxProbe: max_probe ?? 48,
+        waveSize: wave_size ?? 8,
+        includeNonVision: include_non_vision ?? false,
+        timeoutMs: timeout_ms ?? 45000,
+      });
+
+      const baris = [
+        `🔍 **Pemindaian model vision 9router**`,
+        ``,
+        `- Katalog 9router: **${r.catalogTotal}** model`,
+        `- Mengklaim vision: **${r.visionClaiming}**`,
+        `- Benar-benar diuji: **${r.probed}**`,
+        `- **Bekerja: ${r.working.length}**${r.reachedTarget ? ` (target ${r.target} tercapai)` : ` — target ${r.target} TIDAK tercapai`}`,
+      ];
+      if (r.notProbed) {
+        baris.push(`- ⚠️ **${r.notProbed} model tidak diuji** (kena batas \`max_probe\`)`);
+      }
+
+      baris.push(``, `**Model yang bekerja** (tercepat dulu):`);
+      if (!r.working.length) {
+        baris.push(`- (tidak ada)`);
+      } else {
+        for (const w of r.working) baris.push(`- \`${w.model}\` — ${w.ms}ms (${w.provider})`);
+      }
+
+      const fk = r.failureKinds || {};
+      if (Object.keys(fk).length) {
+        baris.push(``, `**Sebab kegagalan model lain:**`);
+        for (const [k, v] of Object.entries(fk).sort((a, b) => b[1] - a[1])) {
+          baris.push(`- ${v}× ${k}`);
+        }
+      }
+
+      baris.push(``, `_Hasil di-cache — \`analyze_image\` akan memakai model teratas secara otomatis._`);
+      return teks(baris.join('\n'));
+    } catch (err) {
+      return galat(`Pemindaian gagal: ${err.message}`);
+    }
+  }
+);
+
+// ---------- get_usage_stats ----------
 server.tool(
   'get_usage_stats',
-  'Menampilkan statistik pemakaian analisis gambar: jumlah panggilan per backend, per model, riwayat harian, dan status backend mana saja yang siap dipakai.',
+  'Statistik pemakaian analisis gambar: jumlah per model, riwayat harian, status backend, dan ringkasan hasil pemindaian model vision.',
   {},
   async () => {
     const stats = getUsageStats();
-    const backends = getBackendInfo();
+    const b = getBackendInfo();
 
-    const lines = [
-      `📊 **Statistik Pemakaian MCP Vision**`,
-      ``,
-      `**Backend (urutan fallback):**`,
-    ];
-    for (const b of backends) {
-      const tanda = b.ready ? '✅ siap' : '⚠️  belum dikonfigurasi';
-      lines.push(`- ${b.label}: ${tanda}${b.model ? ` — model default \`${b.model}\`` : ''}${b.note ? ` (${b.note})` : ''}`);
+    const baris = [`📊 **Statistik MCP Vision**`, ``, `**Backend:**`];
+    baris.push(
+      `- ${b.label}: ${b.ready ? '✅ siap' : '⚠️ belum dikonfigurasi'}` +
+        `${b.note ? ` (${b.note})` : ''} — \`${b.baseUrl}\``
+    );
+    baris.push(`- Model default: \`${b.defaultModel}\``);
+
+    if (b.discovery) {
+      const d = b.discovery;
+      baris.push(
+        ``,
+        `**Pemindaian model vision terakhir:**`,
+        `- Waktu: ${new Date(d.scannedAt).toLocaleString('id-ID')}`,
+        `- Bekerja: **${d.working}** dari ${d.probed} diuji (katalog ${d.catalogTotal}, klaim vision ${d.visionClaiming})`,
+        `- Target tercapai: ${d.reachedTarget ? 'ya' : 'TIDAK'}` +
+          (d.notProbed ? ` | ${d.notProbed} tidak diuji` : '')
+      );
+      if (d.top?.length) {
+        baris.push(`- Teratas: ${d.top.map((t) => `\`${t.model}\` (${t.ms}ms)`).join(', ')}`);
+      }
+    } else {
+      baris.push(``, `**Pemindaian model vision:** belum pernah dijalankan.`);
+      baris.push(`_Panggil \`discover_vision_models\` supaya \`analyze_image\` bisa memilih model otomatis._`);
     }
 
-    lines.push(
+    baris.push(
       ``,
-      `- **Panggilan hari ini**: ${stats.today} request`,
-      `- **Total panggilan (semua waktu)**: ${stats.totalCalls} request`,
+      `- **Panggilan hari ini**: ${stats.today}`,
+      `- **Total panggilan**: ${stats.totalCalls}`,
       ``,
-      `**Per Backend/Model:**`
+      `**Per model:**`
     );
 
     const entries = Object.entries(stats.byModel || {});
-    if (entries.length === 0) {
-      lines.push(`- (belum ada pemakaian)`);
+    if (!entries.length) {
+      baris.push(`- (belum ada pemakaian)`);
     } else {
       for (const [key, m] of entries) {
-        lines.push(
-          `- ${key}: ${m.count} panggilan (${m.errors} error), terakhir: ${m.lastUsedAt ? new Date(m.lastUsedAt).toLocaleString('id-ID') : '-'}`
+        baris.push(
+          `- \`${key}\`: ${m.count}× (${m.errors} error)` +
+            `${m.lastUsedAt ? `, terakhir ${new Date(m.lastUsedAt).toLocaleString('id-ID')}` : ''}`
         );
       }
     }
 
-    lines.push(``, `**Riwayat Harian (7 hari terakhir):**`);
+    baris.push(``, `**Riwayat harian:**`);
     const days = Object.entries(stats.byDay || {})
-      .sort((a, b) => b[0].localeCompare(a[0]))
+      .sort((a, c) => c[0].localeCompare(a[0]))
       .slice(0, 7);
-    if (days.length === 0) {
-      lines.push(`- (belum ada data)`);
-    } else {
-      for (const [day, count] of days) {
-        lines.push(`- ${day}: ${count} request`);
-      }
-    }
+    if (!days.length) baris.push(`- (belum ada data)`);
+    else for (const [day, count] of days) baris.push(`- ${day}: ${count}`);
 
-    return {
-      content: [{ type: 'text', text: lines.join('\n') }],
-    };
+    return teks(baris.join('\n'));
   }
 );
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('MCP Vision Image Server running on stdio');
+  await server.connect(new StdioServerTransport());
+  console.error('MCP Vision Image Server v3.0.0 running on stdio');
 }
 
 main().catch((err) => {

@@ -1,8 +1,12 @@
 /**
  * Pencatatan pemakaian analisis gambar ke file lokal.
  *
- * Struktur: { byModel: { "<backend>/<model>": { count, lastUsedAt, errors } },
+ * Struktur: { byModel: { "<model>": { count, lastUsedAt, errors } },
  *             byDay: { "YYYY-MM-DD": count } }
+ *
+ * Kunci memakai id model lengkap (mis. "ag/gemini-3.8-flash-high") karena
+ * sejak v3.0.0 backend-nya cuma satu — yang menarik justru model mana yang
+ * dipakai.
  *
  * Ditulis dengan pola fail-safe: kegagalan menulis statistik TIDAK boleh
  * menggagalkan permintaan analisis gambar yang sebenarnya.
@@ -15,7 +19,7 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, '..', 'stats', 'usage.json');
 
-export function recordUsage(backend, model, { success = true, errorMsg = null } = {}) {
+export function recordUsage(model, { success = true, errorMsg = null } = {}) {
   try {
     const dir = path.dirname(STATS_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -34,7 +38,7 @@ export function recordUsage(backend, model, { success = true, errorMsg = null } 
     const today = new Date().toISOString().slice(0, 10);
     stats.byDay[today] = (stats.byDay[today] || 0) + 1;
 
-    const key = `${backend}/${model}`;
+    const key = model;
     if (!stats.byModel[key]) {
       stats.byModel[key] = { count: 0, lastUsedAt: null, errors: 0 };
     }

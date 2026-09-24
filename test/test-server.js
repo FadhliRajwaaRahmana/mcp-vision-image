@@ -6,53 +6,16 @@
  *
  * Jalankan:
  *   ROUTER9_API_KEY=xxx node test/test-server.js
- *   # atau, kalau hanya ingin menguji jalur Gemini:
- *   GEMINI_API_KEY=xxx VISION_BACKENDS=gemini node test/test-server.js
+ *
+ * Uji ini memanggil tool lewat protokol MCP sungguhan (stdio), jadi yang
+ * diuji adalah perilaku yang benar-benar dilihat klien.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-
-// ---- Pembuat PNG minimal (tanpa dependensi) ----
-function crc32(buf) {
-  let c, crc = 0xffffffff;
-  for (let n = 0; n < buf.length; n++) {
-    c = (crc ^ buf[n]) & 0xff;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    crc = (crc >>> 8) ^ c;
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-function chunk(type, data) {
-  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
-  const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
-  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
-  return Buffer.concat([len, td, crc]);
-}
-function makeTestPng(w = 480, h = 240) {
-  const raw = Buffer.alloc((w * 3 + 1) * h);
-  let o = 0;
-  for (let y = 0; y < h; y++) {
-    raw[o++] = 0;
-    for (let x = 0; x < w; x++) {
-      let r = 255, g = 255, b = 255;
-      if (x < 150 && y > 40 && y < 200) { r = 220; g = 40; b = 40; }        // merah
-      else if (x > 165 && x < 315 && y > 40 && y < 200) { r = 40; g = 190; b = 80; }  // hijau
-      else if (x > 330 && y > 40 && y < 200) { r = 40; g = 80; b = 220; }   // biru
-      raw[o++] = r; raw[o++] = g; raw[o++] = b;
-    }
-  }
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8; ihdr[9] = 2;
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
-  ]);
-}
+import { makeTestPng } from '../src/testimage.js';
 
 const hasil = [];
 function cek(nama, lulus, detail = '') {
@@ -62,17 +25,16 @@ function cek(nama, lulus, detail = '') {
 
 async function runTest() {
   const adaRouter9 = Boolean(process.env.ROUTER9_API_KEY);
-  const adaGemini = Boolean(process.env.GEMINI_API_KEY);
 
-  if (!adaRouter9 && !adaGemini) {
-    console.error('Tidak ada backend yang dikonfigurasi.');
-    console.error('Set ROUTER9_API_KEY (disarankan) atau GEMINI_API_KEY.');
+  if (!adaRouter9) {
+    console.error('ROUTER9_API_KEY belum diset.');
+    console.error('Set ke API key 9router (dashboard → Endpoint & Key).');
     process.exit(1);
   }
 
   console.log('--- MCP Vision Server Smoke Test ---');
-  console.log(`backend: ${process.env.VISION_BACKENDS || 'router9,gemini'}`);
-  console.log(`ROUTER9_API_KEY: ${adaRouter9 ? 'ada' : 'tidak ada'} | GEMINI_API_KEY: ${adaGemini ? 'ada' : 'tidak ada'}\n`);
+  console.log(`ROUTER9_API_KEY: ada`);
+  console.log(`ROUTER9_BASE_URL: ${process.env.ROUTER9_BASE_URL || 'http://127.0.0.1:20128'}\n`);
 
   // Siapkan gambar uji
   const tmpDir = path.resolve('test');
@@ -87,13 +49,14 @@ async function runTest() {
     env: { ...process.env },
   });
 
-  const client = new Client({ name: 'test-client', version: '2.0.0' }, { capabilities: {} });
+  const client = new Client({ name: 'test-client', version: '3.0.0' }, { capabilities: {} });
   await client.connect(transport);
   cek('terhubung ke MCP server via stdio', true);
 
   const tools = await client.listTools();
   const namaTool = tools.tools.map((t) => t.name);
   cek('tool analyze_image terdaftar', namaTool.includes('analyze_image'), namaTool.join(', '));
+  cek('tool discover_vision_models terdaftar', namaTool.includes('discover_vision_models'));
   cek('tool get_usage_stats terdaftar', namaTool.includes('get_usage_stats'));
 
   // --- Uji utama: analisis gambar ---
@@ -125,7 +88,31 @@ async function runTest() {
       /hijau|green|绿/i.test(teks) &&
       /biru|blue|蓝/i.test(teks);
     cek('jawaban menyebut 3 kotak + merah/hijau/biru', benar, benar ? '' : 'jawaban tidak lengkap');
+    // Model yang dipakai harus dilaporkan supaya jelas siapa yang bekerja.
+    const m = teks.match(/model: ([^\s;,)]+)/);
+    cek('melaporkan model yang dipakai', Boolean(m), m ? m[1] : 'tidak ditemukan di jawaban');
   }
+
+  // --- discover_vision_models (pemindaian nyata) ---
+  // Pemindaian sengaja menguji model satu per satu, jadi wajar makan puluhan
+  // detik. Timeout klien MCP bawaan (60 detik) terlalu pendek di sini — tanpa
+  // dinaikkan, kegagalan yang muncul adalah soal timeout klien, bukan soal
+  // kode yang diuji.
+  console.log('\n--- discover_vision_models ---');
+  const disc = await client.callTool(
+    {
+      name: 'discover_vision_models',
+      arguments: { target: 2, max_probe: 16, wave_size: 8 },
+    },
+    undefined,
+    { timeout: 300000 }
+  );
+  const teksDisc = (disc.content || []).map((c) => c.text).filter(Boolean).join('\n');
+  cek('discover_vision_models tidak error', !disc.isError, disc.isError ? teksDisc.slice(0, 200) : '');
+  cek('melaporkan jumlah model yang diuji', /Benar-benar diuji/i.test(teksDisc));
+  cek('melaporkan model yang bekerja', /Model yang bekerja/i.test(teksDisc));
+  const adaYangBekerja = /`[^`]+\/[^`]+`/.test(teksDisc.split('Model yang bekerja')[1] || '');
+  cek('menemukan minimal satu model vision', adaYangBekerja);
 
   // --- get_usage_stats ---
   console.log('\n--- get_usage_stats ---');

@@ -1,18 +1,20 @@
 {
   "name": "mcp-vision-image-fadhli",
-  "version": "2.0.0",
-  "description": "MCP server untuk analisis gambar (vision) dengan fallback berantai: 9router (langganan Antigravity/B.AI) → Gemini API. Tidak lagi bergantung pada quota Google free tier.",
+  "version": "3.0.0",
+  "description": "MCP server untuk analisis gambar lewat 9router, dengan penemuan otomatis model vision yang benar-benar bekerja di mesin Anda. Tanpa quota Google, tanpa daftar model hardcoded.",
   "type": "module",
   "main": "src/server.js",
   "bin": {
     "mcp-vision-image-fadhli": "src/server.js"
   },
   "files": [
-    "src"
+    "src",
+    "README.md"
   ],
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/test-server.js"
+    "test": "node test/test-server.js",
+    "probe": "node test/probe-vision.js"
   },
   "keywords": [
     "mcp",
@@ -20,9 +22,9 @@
     "vision",
     "image",
     "9router",
-    "gemini",
     "claude",
-    "fallback"
+    "antigravity",
+    "auto-discovery"
   ],
   "license": "MIT",
   "engines": {

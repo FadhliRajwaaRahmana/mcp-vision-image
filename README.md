@@ -1,31 +1,55 @@
 # mcp-vision-image-fadhli
 
-MCP server untuk analisis gambar (image vision) dengan **fallback berantai** — berjalan via stdio.
+MCP server untuk analisis gambar lewat **[9router](https://github.com/decolua/9router)** — dengan **penemuan otomatis model vision yang benar-benar bekerja di mesin Anda**.
 
-Tidak lagi bergantung pada satu penyedia. Kalau backend pertama kena batas kuota
-atau error, otomatis pindah ke berikutnya.
+Tidak perlu daftar model hardcoded. Tidak perlu API key Google. Tidak ada quota free tier.
 
-## Kenapa berubah (v2.0.0)
+---
 
-Versi 1.x hanya memanggil **Gemini API langsung**. Free tier-nya sekarang
-dibatasi **20 request/hari per model** (terukur 24 Sep 2026: HTTP 429
-`generate_content_free_tier_requests`). Begitu batas itu kena, MCP ini
-**mati total** — tidak ada jalur lain.
+## Kenapa perlu penemuan otomatis?
 
-Versi 2.x memakai **9router** sebagai jalur utama. 9router adalah gateway lokal
-yang memakai kuota **langganan** (Antigravity / B.AI) yang sudah Anda miliki,
-bukan quota Google AI Studio.
+9router mengekspos ratusan model, dan katalognya punya flag `capabilities.vision`. **Flag itu tidak bisa dipercaya.**
 
-## Urutan backend
+Diukur pada satu mesin (24 Sep 2026):
 
-Default: **9router → Gemini**
+| | |
+|---|---|
+| Model di katalog | 824 |
+| Mengklaim `vision: true` | 468 |
+| **Benar-benar bisa memproses gambar** | **segelintir** |
 
-Atur lewat env `VISION_BACKENDS`, mis. `gemini` atau `gemini,router9`.
+Sampel 50 model yang mengklaim vision: hanya 4 yang menjawab benar. Sisanya gagal karena:
 
-## Fitur
+- `401/403` — API key provider mati
+- `402` — kredit habis
+- `5xx` — error upstream (dibungkus 9router jadi 503)
+- **`200` dengan `content` kosong** — paling menyesatkan: HTTP sukses, tapi tidak ada jawaban
+- timeout
 
-- `analyze_image` — analisis gambar dari **path lokal** atau **URL online** (PNG/JPG/WebP/GIF/BMP/SVG)
-- `get_usage_stats` — statistik pemakaian per backend, riwayat harian, dan **status backend mana yang siap**
+**Yang penting:** penyebabnya hampir selalu **provider**, bukan model. Dan karena setiap instalasi 9router punya provider & akun yang berbeda, daftar model yang bekerja **tidak bisa di-hardcode** — harus ditemukan di mesin tempat server berjalan.
+
+---
+
+## Cara kerja
+
+```
+analyze_image
+   │
+   ├─ 1. Coba model eksplisit / env ROUTER9_MODEL / cache / default
+   │     └─ berhasil? selesai. (kasus umum, cepat)
+   │
+   └─ 2. Semua gagal → pindai mesin ini
+         ├─ sapu SATU model per provider (gelombang 1)
+         ├─ provider hidup? perdalam di gelombang berikutnya
+         ├─ uji pakai gambar 3 kotak, nilai jawabannya
+         └─ simpan hasil → pakai model tercepat
+```
+
+**Mengapa menyapu provider dulu:** kegagalan itu soal provider. Menguji 5 model dari provider yang sama itu sia-sia — kalau providernya mati, kelimanya mati. Gelombang 1 mengambil satu model per provider, jadi berapa pun jumlah providernya, sekali jalan langsung ketahuan mana yang hidup.
+
+**Model dinilai secara objektif.** Gambar uji berisi 3 kotak (merah, hijau, biru). Model yang benar-benar bisa melihat akan menyebut ketiga warna; model yang mengarang tidak akan cocok.
+
+---
 
 ## Instalasi
 
@@ -33,75 +57,113 @@ Atur lewat env `VISION_BACKENDS`, mis. `gemini` atau `gemini,router9`.
 npm install -g mcp-vision-image-fadhli
 ```
 
-### Setup di Claude Code
+Butuh **9router berjalan** di mesin yang sama (default `http://127.0.0.1:20128`).
 
-```bash
-claude mcp add mcp-vision-image -s user -t stdio \
-  -e ROUTER9_API_KEY=sk-xxx \
-  -- npx -y mcp-vision-image-fadhli
-```
+### Konfigurasi MCP
 
-`ROUTER9_API_KEY` adalah API key 9router Anda (dashboard → API Keys).
-
-### Setup di Pi
-
-Tambahkan ke `~/.pi/agent/mcp.json`:
+Tambahkan ke `~/.claude.json` (atau config MCP klien Anda):
 
 ```json
 {
   "mcpServers": {
     "mcp-vision-image": {
+      "type": "stdio",
       "command": "node",
       "args": ["C:\\path\\ke\\mcp-vision-image\\src\\server.js"],
-      "env": { "ROUTER9_API_KEY": "sk-xxx" }
+      "env": {
+        "ROUTER9_API_KEY": "sk-xxxxxxxxxxxx"
+      }
     }
   }
 }
 ```
 
-## Environment variables
+API key diambil dari dashboard 9router → **Endpoint & Key**.
 
-| Variable | Default | Keterangan |
+> **Cuma satu key yang dibutuhkan.** Key 9router membuka seluruh pool model Anda — tidak perlu key Antigravity, B.AI, atau provider lain satu per satu.
+
+### Variabel lingkungan
+
+| Variabel | Default | Keterangan |
 |---|---|---|
-| `ROUTER9_API_KEY` | — | **Wajib** untuk backend 9router. API key dari dashboard 9router. |
+| `ROUTER9_API_KEY` | — | **Wajib.** API key 9router. |
 | `ROUTER9_BASE_URL` | `http://127.0.0.1:20128` | Alamat 9router. |
-| `ROUTER9_MODEL` | `ag/gemini-3.8-flash-medium` | Model default di 9router. |
-| `ROUTER9_TIMEOUT_MS` | `120000` | Batas waktu per panggilan 9router. |
-| `ROUTER9_MAX_TOKENS` | `2000` | Batas token keluaran (model thinking butuh ruang). |
-| `GEMINI_API_KEY` | — | Opsional, untuk backend cadangan Gemini. |
-| `GEMINI_MODEL` | `gemini-3.6-flash` | Model default Gemini langsung. |
-| `VISION_BACKENDS` | `router9,gemini` | Urutan backend yang dicoba. |
+| `ROUTER9_MODEL` | — | Paksa satu model, lewati pemilihan otomatis. |
+| `ROUTER9_MAX_TOKENS` | `2000` | Batas token jawaban. |
+| `ROUTER9_TIMEOUT_MS` | `120000` | Timeout per model. |
 
-## Catatan teknis: kenapa endpoint Anthropic
+---
 
-9router **hanya mengembalikan konten lewat `/v1/messages` (Anthropic)** untuk
-input gambar. Lewat `/v1/chat/completions` (OpenAI), HTTP-nya 200 tapi
-`content`-nya **kosong** — untuk semua model yang diuji.
+## Tools
 
-Terukur pada gambar uji (3 kotak merah/hijau/biru):
+### `analyze_image`
 
-| Model | OpenAI | Anthropic |
+Menganalisis gambar dari file lokal atau URL.
+
+| Parameter | Keterangan |
+|---|---|
+| `image_path` | Path file lokal |
+| `image_url` | URL gambar (diunduh otomatis) |
+| `prompt` | Instruksi spesifik (opsional) |
+| `model` | Paksa model tertentu (opsional) |
+
+Jawabannya menyertakan model mana yang dipakai dan berapa lama.
+
+### `discover_vision_models`
+
+Memindai 9router untuk menemukan model yang benar-benar bisa memproses gambar di mesin ini. Hasilnya di-cache dan dipakai otomatis oleh `analyze_image`.
+
+Jalankan ulang kalau daftar terasa basi (provider berganti, kredit berubah).
+
+| Parameter | Default | Keterangan |
 |---|---|---|
-| `ag/gemini-3.8-flash-high` | kosong | ✅ "Ada 3 kotak, berwarna merah, hijau, dan biru." |
-| `ag/gemini-3.8-flash-medium` | kosong | ✅ "Ada 3 kotak: merah, hijau, dan biru." |
-| `ag/gemini-3.7-flash-high` | kosong | ✅ "Ada 3 kotak dengan warna merah, hijau, dan biru." |
-| `ag/claude-sonnet-4-6` | kosong | ✅ "Terdapat 3 kotak dengan warna merah, hijau, dan biru." |
-| `ag/claude-opus-4-6-thinking` | kosong | ✅ "Ada 3 kotak: merah, hijau, dan biru." |
-| `bai/mimo-v2.6-pro` | kosong | ✅ "Ada 3 kotak berwarna merah, hijau, dan biru." |
+| `target` | 5 | Berhenti setelah sekian model bekerja |
+| `max_probe` | 48 | Batas atas model diuji (pengaman kuota) |
+| `include_non_vision` | false | Ikut uji yang tidak mengklaim vision — untuk memeriksa akurasi metadata |
 
-Model thinking mengirim rantai penalaran di blok `thinking_delta` (sering
-dalam bahasa Mandarin). Server ini **menabikan** blok itu dan hanya mengambil
-`text_delta` — jawaban yang keluar selalu yang final.
+**Batas selalu dilaporkan.** Kalau ada model yang tidak diuji karena kena batas, jumlahnya disebutkan — supaya hasilnya tidak terbaca "menyeluruh" padahal tidak.
+
+### `get_usage_stats`
+
+Statistik pemakaian per model, riwayat harian, status backend, dan ringkasan hasil pemindaian terakhir.
+
+---
+
+## Catatan teknis
+
+### Kenapa endpoint Anthropic, bukan OpenAI?
+
+Untuk input **gambar**, `/v1/chat/completions` di 9router mengembalikan **HTTP 200 dengan `content` kosong** — untuk semua model yang diuji. `/v1/messages` dengan model yang sama menjawab benar. Jadi ini soal jalur translasi gambar di 9router, bukan soal model.
+
+| Endpoint | Hasil untuk input gambar |
+|---|---|
+| `/v1/chat/completions` | HTTP 200, `content` **kosong** |
+| `/v1/messages` | jawaban benar |
+
+### Blok thinking dibuang
+
+Model thinking mengirim rantai penalaran di `thinking_delta` (sering dalam bahasa Mandarin). Parser hanya mengambil `text_delta`, dan `max_tokens` dijaga cukup tinggi supaya jatah tidak habis di thinking lalu menyisakan `content` kosong.
+
+---
 
 ## Test
 
 ```bash
-ROUTER9_API_KEY=sk-xxx node test/test-server.js
+ROUTER9_API_KEY=xxx npm test
 ```
 
-Test membuat gambar uji sendiri (3 kotak berwarna) dan memverifikasi jawabannya
-menyebut 3 kotak + merah/hijau/biru — jadi kelulusannya objektif, bukan sekadar
-"tidak error".
+13 pemeriksaan, termasuk memanggil tool lewat protokol MCP sungguhan (stdio) dan memverifikasi jawaban terhadap gambar uji secara objektif.
+
+Untuk memindai lebih luas di luar test:
+
+```bash
+node test/probe-vision.js --per-provider 2    # sampel stratifikasi
+node test/probe-vision.js --all               # sapu bersih
+node test/probe-vision.js --only ag/gemini-3.8-flash-high
+node test/probe-vision.js --control           # uji akurasi metadata katalog
+```
+
+---
 
 ## Lisensi
 

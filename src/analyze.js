@@ -1,92 +1,190 @@
 /**
- * Orkestrator analisis gambar: coba beberapa backend berurutan sampai ada
- * yang berhasil.
+ * Orkestrator analisis gambar.
  *
- * KENAPA BERANTAI, BUKAN SATU BACKEND:
- * Sebelumnya modul ini hanya memanggil Gemini API langsung. Begitu free tier
- * kena batas (HTTP 429, 20 request/hari), MCP ini MATI TOTAL — tidak ada
- * jalur lain. Sekarang jalur utamanya 9router (memakai kuota langganan
- * Antigravity/B.AI yang sudah ada), dan Gemini hanya cadangan.
+ * SATU BACKEND, TAPI BANYAK MODEL
+ * -------------------------------
+ * Versi sebelumnya memakai rantai 9router → Gemini API. Gemini dibuang karena
+ * free tier-nya cuma 20 request/hari per model — begitu kena HTTP 429, jalur
+ * cadangan itu mati dan tidak menambah keandalan sama sekali. Sekarang semua
+ * lewat 9router, dan keandalannya datang dari PEMILIHAN MODEL, bukan dari
+ * backend kedua.
  *
- * URUTAN DEFAULT: 9router → gemini
- * Bisa diubah lewat env VISION_BACKENDS, mis. "gemini" atau "router9,gemini".
+ * KENAPA PEMILIHAN MODEL JADI MASALAH
+ * -----------------------------------
+ * 9router mengekspos ratusan model, tapi di satu mesin terukur hanya segelintir
+ * yang benar-benar bisa memproses gambar: sisanya kredit providernya habis,
+ * key-nya mati, atau balas HTTP 200 dengan content kosong. Lebih buruk lagi,
+ * `capabilities.vision` di katalog TIDAK bisa dipercaya — ada model yang
+ * mengklaim vision tapi jawabannya kosong.
+ *
+ * Karena itu daftar model yang bekerja ditemukan lewat PENGUJIAN NYATA di
+ * mesin tempat MCP ini berjalan (lihat discover.js), lalu di-cache.
+ *
+ * URUTAN PEMILIHAN MODEL
+ * ----------------------
+ *   1. `model` eksplisit dari pemanggil   (paling diutamakan)
+ *   2. env ROUTER9_MODEL                  (override manual)
+ *   3. model terbaik dari hasil penemuan  (otomatis, terverifikasi)
+ *   4. DEFAULT_MODEL                      (tebakan terakhir)
+ *
+ * Kalau model yang dipilih gagal, model berikutnya dari daftar temuan dicoba
+ * sebelum menyerah.
  */
 
 import { analyzeWithRouter9, getRouter9DefaultModel } from './backends/router9.js';
-import { analyzeWithGemini, getGeminiDefaultModel } from './backends/gemini.js';
+import { readCache, discoverVisionModels, classifyError } from './discover.js';
 
-const BACKENDS = {
-  router9: {
-    name: '9router',
-    label: '9Router',
-    run: analyzeWithRouter9,
-    defaultModel: getRouter9DefaultModel,
-    // 9router = gateway lokal; kalau tidak dikonfigurasi, langsung lewati.
-    ready: () => Boolean(process.env.ROUTER9_API_KEY),
-    notReady: 'ROUTER9_API_KEY belum diset',
-  },
-  gemini: {
-    name: 'gemini',
-    label: 'Gemini API',
-    run: analyzeWithGemini,
-    defaultModel: getGeminiDefaultModel,
-    ready: () => Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY_HERE'),
-    notReady: 'GEMINI_API_KEY belum diset',
-  },
-};
+const DEFAULT_BASE_URL = 'http://127.0.0.1:20128';
 
-const DEFAULT_ORDER = (process.env.VISION_BACKENDS || 'router9,gemini')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
-
-export function getBackendInfo() {
-  return DEFAULT_ORDER.map((n) => {
-    const b = BACKENDS[n];
-    if (!b) return { name: n, label: n, ready: false, error: 'backend tidak dikenal' };
-    return {
-      name: b.name,
-      label: b.label,
-      ready: b.ready(),
-      model: b.ready() ? b.defaultModel() : null,
-      note: b.ready() ? null : b.notReady,
-    };
-  });
+function baseUrl() {
+  return process.env.ROUTER9_BASE_URL || DEFAULT_BASE_URL;
 }
 
 /**
- * Analisis gambar dengan fallback berantai.
- *
- * @returns {{ text: string, backend: string, attempts: Array<{backend:string,ok:boolean,ms:number,error?:string}> }}
- * @throws {Error} kalau SEMUA backend gagal — pesannya menggabungkan semua sebab.
+ * Daftar model yang boleh dicoba, berurutan dari yang paling diinginkan.
+ * @returns {string[]}
  */
-export async function analyzeImage({ base64Data, mimeType, prompt, model }) {
+export function getModelChain(explicitModel) {
+  const chain = [];
+  const push = (m) => {
+    if (m && !chain.includes(m)) chain.push(m);
+  };
+
+  push(explicitModel);
+  push(process.env.ROUTER9_MODEL);
+
+  const cache = readCache(baseUrl());
+  if (cache?.working) {
+    // Sudah diurutkan dari yang tercepat saat penemuan.
+    for (const w of cache.working) push(w.model);
+  }
+
+  push(getRouter9DefaultModel());
+  return chain;
+}
+
+/** Status backend + hasil penemuan terakhir, untuk tool get_usage_stats. */
+export function getBackendInfo() {
+  const bu = baseUrl();
+  const cache = readCache(bu);
+  return {
+    name: 'router9',
+    label: '9Router',
+    ready: Boolean(process.env.ROUTER9_API_KEY),
+    note: process.env.ROUTER9_API_KEY ? null : 'ROUTER9_API_KEY belum diset',
+    baseUrl: bu,
+    defaultModel: getRouter9DefaultModel(),
+    discovery: cache
+      ? {
+          scannedAt: cache.scannedAt,
+          working: (cache.working || []).length,
+          catalogTotal: cache.catalogTotal,
+          visionClaiming: cache.visionClaiming,
+          probed: cache.probed,
+          notProbed: cache.notProbed,
+          reachedTarget: cache.reachedTarget,
+          top: (cache.working || []).slice(0, 5),
+        }
+      : null,
+  };
+}
+
+/**
+ * Analisis gambar lewat 9router, mencoba beberapa model sampai berhasil.
+ *
+ * @param {object} o
+ * @param {string} o.base64Data
+ * @param {string} o.mimeType
+ * @param {string} o.prompt
+ * @param {string} [o.model]     paksa model tertentu
+ * @param {boolean} [o.autoDiscover=true] jalankan penemuan kalau cache kosong
+ * @param {function} [o.onProgress]
+ * @returns {Promise<{text:string, model:string, attempts:Array, discovery:object|null}>}
+ */
+export async function analyzeImage({
+  base64Data,
+  mimeType,
+  prompt,
+  model,
+  autoDiscover = true,
+  onProgress = null,
+}) {
+  const apiKey = process.env.ROUTER9_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'ROUTER9_API_KEY belum diset. Isi dengan API key 9router (dashboard → Endpoint & Key).'
+    );
+  }
+
   const attempts = [];
+  let discovery = null;
+  const mulai = Date.now();
 
-  for (const nama of DEFAULT_ORDER) {
-    const b = BACKENDS[nama];
-    if (!b) {
-      attempts.push({ backend: nama, ok: false, ms: 0, error: 'backend tidak dikenal' });
-      continue;
+  // Coba model yang sudah diketahui dulu.
+  const coba = async (chain) => {
+    for (const m of chain) {
+      const t0 = Date.now();
+      try {
+        const text = await analyzeWithRouter9({
+          base64Data,
+          mimeType,
+          prompt,
+          model: m,
+          baseUrl: baseUrl(),
+          apiKey,
+        });
+        attempts.push({ model: m, ok: true, ms: Date.now() - t0 });
+        return text;
+      } catch (err) {
+        attempts.push({
+          model: m,
+          ok: false,
+          ms: Date.now() - t0,
+          kind: classifyError(err.message),
+          error: String(err.message).slice(0, 250),
+        });
+      }
     }
-    if (!b.ready()) {
-      attempts.push({ backend: nama, ok: false, ms: 0, error: b.notReady });
-      continue;
-    }
+    return null;
+  };
 
-    const mulai = Date.now();
+  // Tahap 1: model eksplisit / env / cache / tebakan default.
+  // Sengaja didahulukan supaya kasus umum selesai cepat — penemuan penuh bisa
+  // memakan lebih dari satu menit, dan klien MCP punya timeout sendiri.
+  const teks1 = await coba(getModelChain(model));
+  if (teks1 !== null) {
+    return { text: teks1, model: attempts[attempts.length - 1].model, attempts, discovery, totalMs: Date.now() - mulai };
+  }
+
+  // Tahap 2: semua kandidat cepat gagal → baru pindai mesin ini.
+  // Di sinilah auto-discovery benar-benar berguna: mesin dengan provider
+  // berbeda butuh daftar model yang berbeda.
+  const bolehPindai = autoDiscover && !model && !process.env.ROUTER9_MODEL;
+  if (bolehPindai) {
     try {
-      const text = await b.run({ base64Data, mimeType, prompt, model: model || b.defaultModel() });
-      attempts.push({ backend: nama, ok: true, ms: Date.now() - mulai });
-      return { text, backend: nama, attempts };
+      discovery = await discoverVisionModels({
+        baseUrl: baseUrl(),
+        apiKey,
+        onProgress,
+      });
+      const teks2 = await coba(discovery.working.map((w) => w.model));
+      if (teks2 !== null) {
+        return { text: teks2, model: attempts[attempts.length - 1].model, attempts, discovery, totalMs: Date.now() - mulai };
+      }
     } catch (err) {
-      attempts.push({ backend: nama, ok: false, ms: Date.now() - mulai, error: String(err.message || err).slice(0, 300) });
-      // Lanjut ke backend berikutnya.
+      attempts.push({
+        model: '(penemuan)',
+        ok: false,
+        ms: 0,
+        kind: 'penemuan gagal',
+        error: String(err.message).slice(0, 200),
+      });
     }
   }
 
-  const ringkas = attempts
-    .map((a) => `  - ${a.backend}: ${a.error}`)
-    .join('\n');
-  throw new Error(`Semua backend vision gagal:\n${ringkas}`);
+  const ringkas = attempts.map((a) => `  - ${a.model}: ${a.error}`).join('\n');
+  throw new Error(
+    `Semua model vision gagal (${attempts.length} dicoba):\n${ringkas}\n\n` +
+      `Jalankan tool \`discover_vision_models\` untuk memindai ulang model yang bekerja di mesin ini.`
+  );
 }
