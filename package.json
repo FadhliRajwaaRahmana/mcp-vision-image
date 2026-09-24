@@ -1,6 +1,6 @@
 {
   "name": "mcp-vision-image-fadhli",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "MCP server untuk analisis gambar lewat 9router, dengan penemuan otomatis model vision yang benar-benar bekerja di mesin Anda. Tanpa quota Google, tanpa daftar model hardcoded.",
   "type": "module",
   "main": "src/server.js",
