@@ -2,14 +2,29 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { processImageSource } from './image.js';
 import { analyzeImage, getBackendInfo, getProviderFilter } from './analyze.js';
 import { discoverVisionModels, readCache } from './discover.js';
 import { getUsageStats, recordUsage } from './usage.js';
 
+// Versi dibaca dari package.json, bukan ditulis ulang di sini. Versi yang
+// di-hardcode pernah tertinggal saat rilis (paket 3.1.0 tapi banner bilang
+// 3.0.0) — sumber kebenaran harus satu saja.
+const VERSI = (() => {
+  try {
+    const p = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    return JSON.parse(readFileSync(p, 'utf-8')).version;
+  } catch {
+    return 'unknown';
+  }
+})();
+
 const server = new McpServer({
   name: 'mcp-vision-image',
-  version: '3.0.0',
+  version: VERSI,
 });
 
 function teks(s) {
@@ -244,7 +259,7 @@ server.tool(
 
 async function main() {
   await server.connect(new StdioServerTransport());
-  console.error('MCP Vision Image Server v3.0.0 running on stdio');
+  console.error(`MCP Vision Image Server v${VERSI} running on stdio`);
 }
 
 main().catch((err) => {
