@@ -3,3 +3,4 @@ stats/
 *.log
 .env
 .npmrc
+test/generated-test.png

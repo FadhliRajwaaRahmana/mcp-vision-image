@@ -3,16 +3,18 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { processImageSource } from './image.js';
-import { analyzeImageWithGemini, getUsageStats, getDefaultModel } from './gemini.js';
+import { analyzeImage, getBackendInfo } from './analyze.js';
+import { getUsageStats, recordUsage } from './usage.js';
 
 const server = new McpServer({
   name: 'mcp-vision-image',
-  version: '1.0.0',
+  version: '2.0.0',
 });
 
 // Pendaftaran Tool: analyze_image
 server.tool(
-  'analyze_image',  'Menganalisis dan mendeskripsikan gambar (file path lokal atau URL) menggunakan Gemini Vision AI.',
+  'analyze_image',
+  'Menganalisis dan mendeskripsikan gambar (file path lokal atau URL) memakai rantai backend vision (9router → Gemini).',
   {
     image_path: z
       .string()
@@ -35,7 +37,9 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe('Model Gemini yang digunakan. Default: "gemini-3.7-flash". Bisa di-override via env GEMINI_MODEL.'),
+      .describe(
+        'Paksa model tertentu (mis. "ag/gemini-3.8-flash-medium" untuk 9router, atau "gemini-3.6-flash" untuk Gemini langsung). Kosongkan agar tiap backend memakai default-nya.'
+      ),
   },
   async ({ image_path, image_url, prompt, model }) => {
     try {
@@ -54,22 +58,31 @@ server.tool(
 
       const { mimeType, base64Data } = await processImageSource(source);
 
-      const analysisResult = await analyzeImageWithGemini({
+      const hasil = await analyzeImage({
         base64Data,
         mimeType,
         prompt: prompt || 'Deskripsikan gambar ini secara detail dalam Bahasa Indonesia.',
-        model: model || getDefaultModel(),
+        model,
       });
+
+      // Catat pemakaian per backend — berguna untuk melihat mana yang kepakai.
+      recordUsage(hasil.backend, model || 'default', { success: true });
+
+      const catatan = hasil.attempts
+        .filter((a) => !a.ok)
+        .map((a) => `${a.backend}: ${a.error}`)
+        .join(' | ');
 
       return {
         content: [
           {
             type: 'text',
-            text: analysisResult,
+            text: catatan ? `${hasil.text}\n\n_(backend: ${hasil.backend}; dilewati → ${catatan})_` : hasil.text,
           },
         ],
       };
     } catch (err) {
+      recordUsage('semua', model || 'default', { success: false, errorMsg: String(err.message).slice(0, 300) });
       return {
         content: [
           {
@@ -83,32 +96,44 @@ server.tool(
   }
 );
 
-// Pendaftaran Tool: get_usage_stats (monitoring pemakaian API Gemini)
+// Pendaftaran Tool: get_usage_stats (monitoring pemakaian)
 server.tool(
   'get_usage_stats',
-  'Menampilkan statistik pemakaian API Gemini Vision (jumlah panggilan hari ini, total, sisa limit harian, per model, dan riwayat harian).',
+  'Menampilkan statistik pemakaian analisis gambar: jumlah panggilan per backend, per model, riwayat harian, dan status backend mana saja yang siap dipakai.',
   {},
   async () => {
     const stats = getUsageStats();
+    const backends = getBackendInfo();
+
     const lines = [
-      `📊 **Statistik Pemakaian MCP Vision (Gemini API)**`,
+      `📊 **Statistik Pemakaian MCP Vision**`,
       ``,
-      `- **Panggilan hari ini**: ${stats.today} / ${stats.todayLimit} request`,
-      `- **Sisa hari ini**: ${stats.remainingToday} request`,
+      `**Backend (urutan fallback):**`,
+    ];
+    for (const b of backends) {
+      const tanda = b.ready ? '✅ siap' : '⚠️  belum dikonfigurasi';
+      lines.push(`- ${b.label}: ${tanda}${b.model ? ` — model default \`${b.model}\`` : ''}${b.note ? ` (${b.note})` : ''}`);
+    }
+
+    lines.push(
+      ``,
+      `- **Panggilan hari ini**: ${stats.today} request`,
       `- **Total panggilan (semua waktu)**: ${stats.totalCalls} request`,
       ``,
-      `**Per Model:**`,
-    ];
-    const models = Object.entries(stats.byModel || {});
-    if (models.length === 0) {
+      `**Per Backend/Model:**`
+    );
+
+    const entries = Object.entries(stats.byModel || {});
+    if (entries.length === 0) {
       lines.push(`- (belum ada pemakaian)`);
     } else {
-      for (const [model, m] of models) {
+      for (const [key, m] of entries) {
         lines.push(
-          `- ${model}: ${m.count} panggilan (${m.errors} error), terakhir: ${m.lastUsedAt ? new Date(m.lastUsedAt).toLocaleString('id-ID') : '-'}`
+          `- ${key}: ${m.count} panggilan (${m.errors} error), terakhir: ${m.lastUsedAt ? new Date(m.lastUsedAt).toLocaleString('id-ID') : '-'}`
         );
       }
     }
+
     lines.push(``, `**Riwayat Harian (7 hari terakhir):**`);
     const days = Object.entries(stats.byDay || {})
       .sort((a, b) => b[0].localeCompare(a[0]))
@@ -120,6 +145,7 @@ server.tool(
         lines.push(`- ${day}: ${count} request`);
       }
     }
+
     return {
       content: [{ type: 'text', text: lines.join('\n') }],
     };

@@ -1,7 +1,7 @@
 {
   "name": "mcp-vision-image-fadhli",
-  "version": "1.3.0",
-  "description": "MCP server untuk analisis gambar (vision) via Gemini API — stdio, bisa dipakai langsung dengan `npx -y mcp-vision-image-fadhli`",
+  "version": "2.0.0",
+  "description": "MCP server untuk analisis gambar (vision) dengan fallback berantai: 9router (langganan Antigravity/B.AI) → Gemini API. Tidak lagi bergantung pada quota Google free tier.",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -18,9 +18,11 @@
     "mcp",
     "model-context-protocol",
     "vision",
-    "gemini",
     "image",
-    "claude"
+    "9router",
+    "gemini",
+    "claude",
+    "fallback"
   ],
   "license": "MIT",
   "engines": {
