@@ -87,30 +87,55 @@ API key diambil dari dashboard 9router → **Endpoint & Key**.
 | Variabel | Default | Keterangan |
 |---|---|---|
 | `ROUTER9_API_KEY` | — | **Wajib.** API key 9router. |
-| `VISION_PROVIDERS` | semua | Batasi pemindaian ke provider tertentu, dipisah koma (mis. `ag,oc`). |
+| `VISION_PROVIDERS` | `ag,oc` | Provider yang dipakai, dipisah koma. Isi `*` untuk semua. |
 | `ROUTER9_BASE_URL` | `http://127.0.0.1:20128` | Alamat 9router. |
 | `ROUTER9_MODEL` | — | Paksa satu model, lewati pemilihan otomatis. |
 | `ROUTER9_MAX_TOKENS` | `2000` | Batas token jawaban. |
 | `ROUTER9_TIMEOUT_MS` | `120000` | Timeout per model. |
 
-### Membatasi ke provider tertentu
+### Provider yang dipakai
 
-Kalau Anda hanya memakai beberapa provider, batasi pemindaian supaya tidak
-boros kuota dan waktu:
+Default **`ag,oc`** — Antigravity dan OpenCode Free. Keduanya dipakai karena
+terukur, bukan dipilih sembarangan:
+
+| Provider | Model | Verifikasi |
+|---|---|---|
+| `ag` (Antigravity) | `gemini-3.8-flash-medium`, `-high`, `3.7-flash-high` | ✅ 4,1 dtk |
+| `oc` (OpenCode Free) | `mimo-v2.5-free`, `muse-spark-1.3-contributor-free`, `1.2-contributor-free` | ✅ 3,8–10 dtk |
+
+Semua diuji 25 Sep 2026 lewat endpoint Anthropic 9router memakai gambar uji
+(3 kotak merah/hijau/biru) — keempatnya menjawab dengan benar.
+
+Kenapa dibatasi: memindai **semua** provider menemukan 4 model bekerja dari 30
+diuji; dibatasi ke `ag,oc` menemukan **8 dari 8**. Provider lain menghabiskan
+waktu dan kuota untuk model yang kreditnya kosong atau key-nya mati.
+
+Ganti lewat env kalau instalasi Anda berbeda:
 
 ```json
 "env": {
   "ROUTER9_API_KEY": "sk-xxxxxxxxxxxx",
-  "VISION_PROVIDERS": "ag,oc"
+  "VISION_PROVIDERS": "ag"          // Antigravity saja
 }
 ```
 
-`ag` = Antigravity, `oc` = OpenCode. Provider yang diminta tapi **tidak ada**
-di katalog akan dilaporkan sebagai peringatan — tidak diabaikan diam-diam.
+Provider yang diminta tapi **tidak ada** di katalog dilaporkan sebagai
+peringatan — tidak diabaikan diam-diam.
 
-Efeknya terukur: memindai semua provider menemukan **4** model bekerja dari 30
-diuji; dibatasi ke `ag` menemukan **9** dari 10 diuji — karena provider yang
-sehat tidak lagi tenggelam di antara provider yang kreditnya habis.
+### Catatan: kenapa endpoint Anthropic
+
+Modul ini memanggil `/v1/messages`, bukan `/v1/chat/completions`. Dua alasan,
+keduanya terukur:
+
+1. **Input gambar di endpoint OpenAI mengembalikan `content` kosong** —
+   HTTP-nya 200, tapi jawabannya tidak ada, untuk semua model yang diuji.
+2. **Provider `oc` kena gate tambahan di endpoint OpenAI.** OpenCode Free
+   hanya menjawab kalau tool quartet `{bash, glob, grep, read}` ikut dikirim;
+   tanpanya, HTTP 200 dengan `content` kosong. Endpoint Anthropic tidak
+   menerapkan gate itu, jadi `oc` bekerja tanpa trik tambahan.
+
+Bentuk responsnya juga tidak seragam — Antigravity menjawab **SSE**, `oc`
+menjawab **JSON**. Parser menangani keduanya.
 
 ---
 

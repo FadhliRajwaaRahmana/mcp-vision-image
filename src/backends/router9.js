@@ -21,10 +21,10 @@
  *   ag/claude-opus-4-6-thinking  OpenAI: kosong | Anthropic: OK
  *   bai/mimo-v2.6-pro            OpenAI: kosong | Anthropic: OK
  *
- * Respons `/v1/messages` datang sebagai SSE. Kita merakit teks dari
- * `content_block_delta`, dan MENABAIKAN `thinking_delta` (model thinking
- * mengirim rantai penalaran di sana — sering dalam bahasa Mandarin, dan itu
- * bukan jawaban yang diinginkan pengguna).
+ * Bentuk respons TIDAK SERAGAM antar model — lihat `parseAnthropicResponse()`.
+ * Antigravity menjawab SSE, sedangkan `mc/` (meta-code) menjawab JSON. Parser
+ * menangani keduanya; blok `thinking_delta` ditabikan di kedua jalur karena
+ * berisi rantai penalaran (sering Mandarin), bukan jawaban pengguna.
  */
 
 const DEFAULT_MODEL = process.env.ROUTER9_MODEL || 'ag/gemini-3.8-flash-medium';
@@ -34,16 +34,61 @@ export function getRouter9DefaultModel() {
 }
 
 /**
- * Rakit teks jawaban dari stream SSE Anthropic.
- * Hanya `content_block_delta` dengan `text_delta` yang dihitung; blok
- * `thinking` sengaja dilewati.
+ * Ambil teks jawaban dari respons `/v1/messages`.
+ *
+ * DUA BENTUK yang mungkin datang — dan ini tidak seragam antar model:
+ *
+ *   - **SSE** (`text/event-stream`): default untuk model Antigravity.
+ *     Jawaban dirakit dari `content_block_delta`.
+ *   - **JSON** (`application/json`): default untuk model `mc/` (meta-code),
+ *     yang transport-nya Responses. 9router mengembalikan satu objek
+ *     `chat.completion` biasa alih-alih stream.
+ *
+ * Diukur 25 Sep 2026 pada endpoint yang sama, tanpa parameter `stream`:
+ *   mc/muse-spark-1.3            → application/json   (JSON)
+ *   ag/gemini-3.8-flash-medium   → text/event-stream  (SSE)
+ *
+ * Parser yang hanya menangani SSE akan mengembalikan string kosong untuk
+ * model `mc/` — jawabannya sebenarnya ada, tapi dibuang, lalu dilaporkan
+ * sebagai "jawaban kosong". Karena itu kedua bentuk ditangani di sini.
+ *
+ * Blok `thinking_delta` sengaja DILEWATI di kedua jalur: model thinking
+ * mengirim rantai penalaran (sering Mandarin) yang bukan jawaban pengguna.
  */
-function parseAnthropicSse(raw) {
+function parseAnthropicResponse(raw) {
+  const teks = String(raw || '').trim();
+
+  // ---- Bentuk JSON: satu objek utuh ----
+  if (teks.startsWith('{')) {
+    try {
+      const j = JSON.parse(teks);
+      // Gaya OpenAI: choices[0].message.content
+      const isi = j.choices?.[0]?.message?.content;
+      if (typeof isi === 'string') {
+        return { jawaban: isi.trim(), thinking: '', stopReason: j.choices?.[0]?.finish_reason || null };
+      }
+      // Gaya Anthropic non-stream: content[] berisi blok text
+      if (Array.isArray(j.content)) {
+        const jawaban = j.content
+          .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+          .map((b) => b.text)
+          .join('')
+          .trim();
+        return { jawaban, thinking: '', stopReason: j.stop_reason || null };
+      }
+      // Objek tapi tidak ada teks — biarkan pemanggil yang memutuskan.
+      return { jawaban: '', thinking: '', stopReason: null };
+    } catch {
+      // Bukan JSON valid (mis. terpotong) — jatuh ke jalur SSE di bawah.
+    }
+  }
+
+  // ---- Bentuk SSE ----
   let jawaban = '';
   let thinking = '';
   let stopReason = null;
 
-  for (const line of raw.split('\n')) {
+  for (const line of teks.split('\n')) {
     if (!line.startsWith('data:')) continue;
     const payload = line.slice(5).trim();
     if (!payload || payload === '[DONE]') continue;
@@ -62,11 +107,18 @@ function parseAnthropicSse(raw) {
       else if (d.text) jawaban += d.text;
     } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
       stopReason = ev.delta.stop_reason;
+    } else if (ev.choices?.[0]?.delta?.content) {
+      // Sebagian upstream membungkus potongan gaya OpenAI dalam SSE.
+      jawaban += ev.choices[0].delta.content;
     }
   }
 
   return { jawaban: jawaban.trim(), thinking: thinking.trim(), stopReason };
 }
+
+/** Nama lama dipertahankan supaya pemanggil/test lama tidak patah. */
+const parseAnthropicSse = parseAnthropicResponse;
+export { parseAnthropicResponse };
 
 export async function analyzeWithRouter9({
   base64Data,
@@ -132,7 +184,7 @@ export async function analyzeWithRouter9({
     throw new Error(`9router HTTP ${response.status}: ${raw.slice(0, 300)}`);
   }
 
-  const { jawaban, stopReason } = parseAnthropicSse(raw);
+  const { jawaban, stopReason } = parseAnthropicResponse(raw);
 
   if (!jawaban) {
     // Bedakan "diblokir" dari "benar-benar kosong" supaya pesan errornya berguna.

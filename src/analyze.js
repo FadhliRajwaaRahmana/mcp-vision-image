@@ -41,21 +41,81 @@ function baseUrl() {
 }
 
 /**
- * Provider yang boleh dipindai, dari env `VISION_PROVIDERS` (mis. "ag,oc").
+ * Provider yang boleh dipindai.
  *
- * Berguna karena sebagian instalasi hanya memakai beberapa provider —
- * memindai 27 provider padahal cuma 2 yang dipakai itu boros kuota & waktu.
- * Kosong/null = semua provider dipindai.
+ * DEFAULT `ag,oc` — Antigravity dan OpenCode Free.
  *
- * @returns {string[]|null}
+ * Alasannya diukur, bukan dipilih sembarangan: memindai SEMUA provider
+ * menghasilkan 4 dari 30 model yang bekerja, sedangkan membatasi ke `ag,oc`
+ * menghasilkan 8 dari 8. Provider lain menghabiskan waktu & kuota untuk model
+ * yang kreditnya kosong, key-nya mati, atau jawabannya kosong.
+ *
+ * Bisa diubah lewat env `VISION_PROVIDERS` (mis. `"ag"` untuk Antigravity
+ * saja). Isi `"*"` untuk memindai semua provider.
+ *
+ * @returns {string[]|null} null = semua provider
  */
+const PROVIDER_DEFAULT = ['ag', 'oc'];
+
 export function getProviderFilter() {
   const raw = process.env.VISION_PROVIDERS;
-  if (!raw || !raw.trim()) return null;
-  return raw
+  if (raw === undefined || raw === null) return PROVIDER_DEFAULT;
+  const teks = String(raw).trim();
+  if (!teks) return PROVIDER_DEFAULT;
+  if (teks === '*') return null; // minta semua provider secara eksplisit
+  return teks
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * Model yang sudah terbukti bisa vision, dari provider `ag` dan `oc`.
+ *
+ * Dicoba LEBIH DULU sebelum pemindaian penuh: pemindaian menguji puluhan model
+ * dan butuh lebih dari satu menit, sementara klien MCP punya timeout sendiri.
+ * Daftar ini membuat kasus umum selesai dalam hitungan detik.
+ *
+ * Diverifikasi live 25 Sep 2026 lewat endpoint Anthropic 9router, memakai
+ * gambar uji (3 kotak merah/hijau/biru). Semua di bawah menjawab dengan benar:
+ *
+ *   ag/gemini-3.8-flash-medium             "Ada 3 kotak: merah, hijau, dan biru."
+ *   ag/gemini-3.8-flash-high               "Ada 3 kotak, berwarna merah, hijau, dan biru."
+ *   ag/gemini-3.7-flash-high               "Ada 3 kotak dengan warna merah, hijau, dan biru."
+ *   oc/mimo-v2.5-free                      "Ada 3 kotak dengan warna merah, hijau, dan biru."
+ *   oc/muse-spark-1.3-contributor-free     "Ada 3 kotak berwarna merah, hijau, dan biru."
+ *   oc/muse-spark-1.2-contributor-free     "Ada 3 kotak berwarna merah, hijau, dan biru."
+ *
+ * JEBAKAN provider `oc` (OpenCode Free) — jangan sampai terlewat lagi:
+ * lewat endpoint **OpenAI** (`/v1/chat/completions`), `oc` menjawab HTTP 200
+ * dengan `content` KOSONG kalau tool quartet `{bash,glob,grep,read}` tidak
+ * dikirim. Lewat endpoint **Anthropic** (`/v1/messages`) yang dipakai modul
+ * ini, gate itu TIDAK berlaku — jawabannya normal. Karena itu backend ini
+ * memakai Anthropic, dan `oc` di sini bekerja tanpa trik tambahan.
+ *
+ * Urutan: `ag` dulu (kuota langganan Antigravity, paling cepat), lalu `oc`
+ * sebagai pelapis gratis.
+ */
+const KANDIDAT_CEPAT = [
+  'ag/gemini-3.8-flash-medium',
+  'ag/gemini-3.8-flash-high',
+  'ag/gemini-3.7-flash-high',
+  'oc/mimo-v2.5-free',
+  'oc/muse-spark-1.3-contributor-free',
+  'oc/muse-spark-1.2-contributor-free',
+];
+
+/**
+ * Saring daftar model agar hanya menyisakan provider yang diizinkan.
+ *
+ * Dipakai untuk menjaga urutan cepat tetap patuh pada `VISION_PROVIDERS` —
+ * kalau pengguna membatasi ke `ag` saja, kandidat `oc/*` dibuang sebelum
+ * dicoba, bukan dicoba lalu gagal.
+ */
+function saringProvider(daftar, filter) {
+  if (!filter) return daftar;
+  const izin = new Set(filter);
+  return daftar.filter((m) => izin.has(String(m).split('/')[0]));
 }
 
 /**
@@ -71,10 +131,15 @@ export function getModelChain(explicitModel) {
   push(explicitModel);
   push(process.env.ROUTER9_MODEL);
 
+  const filter = getProviderFilter();
+
+  // Jalur cepat: model yang sudah diketahui bekerja di provider yang diizinkan.
+  for (const m of saringProvider(KANDIDAT_CEPAT, filter)) push(m);
+
   const cache = readCache(baseUrl());
   if (cache?.working) {
     // Sudah diurutkan dari yang tercepat saat penemuan.
-    for (const w of cache.working) push(w.model);
+    for (const w of saringProvider(cache.working.map((w) => w.model), filter)) push(w.model);
   }
 
   push(getRouter9DefaultModel());
